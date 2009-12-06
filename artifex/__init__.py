@@ -121,15 +121,14 @@ class Dependencies(object):
             deps = self.add(iname)
 
         if not os.path.isfile(oname):
+            del self._depends[iname]
             return True
         omtime = os.stat(oname).st_mtime
 
-        #if _fileisnewer(omtime, iname):
-        #    return True
         for dep in deps:
             if _fileisnewer(omtime, dep):
+                del self._depends[iname]
                 return True
-
         return False
 
 class Target(object):
