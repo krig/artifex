@@ -1,6 +1,6 @@
 from subprocess import Popen, call, PIPE
-import os, sys, re, cPickle, glob
-VERSION = (0, 1, 1)
+import os, sys, re, cPickle, glob, hashlib, pprint
+VERSION = (0, 1, 2)
 
 class Color:
     Clean = '\033[95m'
@@ -85,11 +85,20 @@ def debug(s, *args):
     if _opts.debug:
         print s % args
 
+def _calc_checksum_file(fil):
+    try:
+        f = open(fil)
+        return hashlib.sha1(f.read()).hexdigest()
+    finally:
+        f.close()
+
+def _calc_checksum_str(string):
+    return hashlib.sha1(string).hexdigest()
+
 def _fileisnewer(mtime, fil):
     if os.path.isfile(fil):
         return os.stat(fil).st_mtime > mtime
-    else:
-        return False
+    return False
 
 def _flatten(lst):
     res = []
@@ -145,17 +154,25 @@ class DepScanner(object):
         m = self.include_re.match(line)
         return m.group(1) if m else None
 
-    def scan_include(self, finder, fil, collect=set([])):
+    def scan_include(self, finder, fil, dependencies, collect=set([])):
         if not self.include_re:
             self.include_re = re.compile(r"\s*#\s*include\s*\"([^\"]+)\"")
         try:
             finder.push(os.path.dirname(fil))
             found = finder.locate(fil)
-            for line in open(found).readlines():
+            if dependencies.in_cache(found):
+                return collect
+            handle = open(found)
+            lines = handle.readlines()
+            handle.close()
+            for line in lines:
                 m = self._match_include(line)
                 if m:
-                    self.scan_include(finder, m, collect)
+                    self.scan_include(finder, m, dependencies, collect)
             finder.pop()
+            mtime = os.stat(found).st_mtime
+            cs = _calc_checksum_str(''.join(lines))
+            dependencies.add_to_cache(found, mtime, cs)
             collect.add(found)
         except IOError, e:
             debug("DepScanner: %s", e)
@@ -167,49 +184,97 @@ class Dependencies(object):
     def __init__(self):
         self.scanner = DepScanner()
         self.finder = Finder()
-        self._changed = False
-        self._depends = {}
+        self.changed = False
+        self.depends = {} # filename -> [filename]
+        self.filecache = {} # filename -> (mtime, sha-1)
+        self.objcache = {} # objname -> (mtime, sha-1)
+
+    def add_to_cache(self, fil, mtime, checksum):
+        debug("Adding to file cache: %s -> (%s, %s)", fil, mtime, checksum)
+        self.changed = True
+        self.filecache[fil] = (mtime, checksum)
+
+    def in_cache(self, fil):
+        return fil in self.filecache
 
     def add(self, fil):
-        ret = self.scanner.scan_include(self.finder, fil)
-        self._depends[fil] = ret
-        self._changed = True
+        ret = self.scanner.scan_include(self.finder, fil, self)
+        self.depends[fil] = ret
+        self.changed = True
         debug("?: %s -> %s", fil, ret)
         return ret
 
-    def get(self, fil):
-        return self._depends.get(fil, None)
+    def _get(self, fil):
+        return self.depends.get(fil, None)
 
     def save(self, to):
-        if self._changed:
-            debug("Saving dependencies: %s", self._depends)
+        if self.changed:
             f = open(to, 'w')
-            cPickle.dump(self._depends, f)
+            cPickle.dump(self.depends, f, cPickle.HIGHEST_PROTOCOL)
+            cPickle.dump(self.filecache, f, cPickle.HIGHEST_PROTOCOL)
+            cPickle.dump(self.objcache, f, cPickle.HIGHEST_PROTOCOL)
             f.close()
+            debug("Saved dependencies to %s", to)
 
     def load(self, fname):
         if os.path.isfile(fname):
             f = open(fname)
-            self._depends = cPickle.load(f)
-            debug("Loaded dependencies: %s", self._depends)
+            self.depends = cPickle.load(f)
+            self.filecache = cPickle.load(f)
+            self.objcache = cPickle.load(f)
+            debug("Loaded dependencies:\n%s", pprint.pformat(self.depends, indent=2, width=60))
+            debug("Loaded filecache:\n%s", pprint.pformat(self.filecache, indent=2, width=60))
+            debug("Loaded objcache:\n%s", pprint.pformat(self.objcache, indent=2, width=60))
             f.close()
-            self._changed = False
+            self.changed = False
+
+            debug("Checking for changes to file cache...")
+            self._refresh_filecache()
+            debug("Done.")
         else:
-            self._depends = {}
+            self.depends = {}
+
+    def _refresh_filecache(self):
+        """recheck checksums, drop files that have changed"""
+        rm = []
+        for fil, (mtime, sha1) in self.filecache.iteritems():
+            if not os.path.isfile(fil):
+                rm.append(fil)
+                continue
+            nmtime = os.stat(fil).st_mtime
+            if nmtime > mtime:
+                nsha1 = _calc_checksum_file(fil)
+                if nsha1 != sha1:
+                    rm.append(fil)
+        for fil in rm:
+            debug("%s changed, dropping from file cache", fil)
+            del self.filecache[fil]
+
+    def add_to_objcache(self, oname):
+        omtime = os.stat(oname).st_mtime
+        osha1 = _calc_checksum_file(oname)
+        debug("Adding %s -> (%s, %s) to objcache", oname, omtime, osha1)
+        self.changed = True
+        self.objcache[oname] = (omtime, osha1)
+        return (omtime, osha1)
 
     def is_dirty(self, iname, oname):
-        deps = self.get(iname)
+        deps = self._get(iname)
         if not deps:
             deps = self.add(iname)
 
         if not os.path.isfile(oname):
             return True
-        omtime = os.stat(oname).st_mtime
+
+        omtime, osha1 = self.objcache.get(oname, (None, None))
+        if not omtime:
+            omtime, osha1 = self.add_to_objcache(oname)
 
         for dep in deps:
-            if _fileisnewer(omtime, dep):
-                debug("%s is newer, delete deps", dep)
-                del self._depends[iname]
+            if dep not in self.filecache:
+                debug("%s changed, %s is dirty", dep, oname)
+                del self.depends[iname]
+                del self.objcache[oname]
                 return True
         return False
 
@@ -242,7 +307,7 @@ class Target(object):
             '_pkgconfig_proc' : self._pkgconfig_proc
             }
         f = open(self._cachefile, 'w')
-        cPickle.dump(cachedata, f)
+        cPickle.dump(cachedata, f, cPickle.HIGHEST_PROTOCOL)
         f.close()
 
     def load_cache(self):
@@ -395,27 +460,32 @@ def after(fn):
     return None
 
 def config_h(fn):
+    file_template = """#ifndef CONFIG_H_ARTIFEX
+#define CONFIG_H_ARTIFEX
+
+%(values)s
+
+#endif/*CONFIG_H_ARTIFEX*/
+"""
+    value_template = """#define %s %s
+"""
     class ConfigH(object):
         def __init__(self, pkg):
             self.pkg = pkg
             self.name = "config.h"
         def write(self):
-            towrite = """#ifndef CONFIG_H_ARTIFEX
-#define CONFIG_H_ARTIFEX
-"""
-            values = [(x, getattr(cfg, x)) for x in dir(cfg) if not x.startswith('_')]
+            values = [(x, getattr(cfg, x)) for x in dir(cfg) if not (x.startswith('_') or x in ['pkg', 'name', 'write'])]
+            valuestr = ""
             for key, val in values:
-                if key == "pkg" or key == "name" or key == "write":
-                    continue
                 if isinstance(val, basestring):
-                    towrite += '#define %s "%s"\n' % (key, val)
+                    valuestr += value_template % (key, val)
                 elif isinstance(val, (int, long)):
-                    towrite += "#define %s %s\n" % (key, val)
-            towrite += """#endif /*CONFIG_H_ARTIFEX*/
-"""
+                    valuestr += value_template % (key, val)
+            towrite = file_template % {'values':valuestr}
             if os.path.isfile(self.name):
                 current = open(self.name).read()
                 if current == towrite:
+                    debug("%s - up to date, skipping", self.name)
                     return
             f = open(self.name, 'w')
             f.write(towrite)
