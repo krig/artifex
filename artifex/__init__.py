@@ -1,6 +1,6 @@
-from subprocess import Popen, call
+from subprocess import Popen, call, PIPE
 import os, sys, re, cPickle
-VERSION = (0, 1, 0)
+VERSION = (0, 1, 1)
 
 def _mkdir(dr):
     if os.path.isfile(dr):
@@ -148,6 +148,13 @@ class Target(object):
         self._target_path = None
         self._target_mtime = None
 
+    def pkgconfig(self, name):
+        flags = Popen(["pkg-config", "--cflags", name], stdout=PIPE).communicate()[0].split()
+        self.cflags = self.cflags + flags
+        libs = Popen(["pkg-config", "--libs", name], stdout=PIPE).communicate()[0].split()
+        self.libs = self.libs + libs
+        debug("pkgconfig %s: %s, %s", name, flags, libs)
+
     def _objform(self, sourcefile):
         sppath = os.path.splitext(sourcefile)
         return os.path.join(self.tempdir, sppath[0]+".o")
@@ -197,8 +204,6 @@ class Target(object):
                 self.source = self.source.split()
             if self.cc == "gcc" and any(_cppname(s) for s in self.source):
                 self.cc = "g++"
-            _mkdir(self.outdir)
-            _mkdir(self.tempdir)
             self._target_path = os.path.join(self.outdir, self.name)
             try:
                 self._target_mtime = os.stat(self._target_path).st_mtime
@@ -209,6 +214,8 @@ class Target(object):
                 me = sys.argv[0]
                 if _fileisnewer(self._target_mtime, me):
                     self._clean()
+            _mkdir(self.outdir)
+            _mkdir(self.tempdir)
             depfile = os.path.join(self.tempdir, self.name + ".depends")
             self.deps.load(depfile)
             self.build()

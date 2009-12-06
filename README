@@ -24,6 +24,5 @@ with `-c` as a parameter.
 
 ## TODO
 
-* support for pkgconfig
-* support for include files
+* better support for multiple source and include directories
 
