@@ -11,4 +11,4 @@ setup(
     packages=['artifex'],
     license='GPL',
     install_requires=['setuptools'],
-    data_files=[('examples', ['examples/loverly.mk'])])
+    data_files=[('share/artifex/examples', ['examples/loverly.mk'])])
