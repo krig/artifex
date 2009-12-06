@@ -10,4 +10,5 @@ setup(
     url='github.com/krig',
     packages=['artifex'],
     license='GPL',
-    install_requires=['setuptools'])
+    install_requires=['setuptools'],
+    data_files=[('examples', ['examples/loverly.mk'])])

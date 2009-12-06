@@ -1,0 +1,17 @@
+Source: artifex
+Section: devel
+Priority: optional
+Maintainer: Kristoffer Grönlund
+Build-Depends: debhelper (>> 7), python-support (>= 0.8)
+XS-Python-Version: >=2.5
+Standards-Version: 3.8.3
+
+Package: artifex
+Architecture: all
+Homepage: http://github.com/krig/
+XB-Python-Version: ${python:Versions}
+Depends: ${misc:Depends}, ${python:Depends}
+Description: A build tool for C/C++ projects.
+ Artifex is designed to be minimal. For an example of a 
+ build script using artifex, see examples/loverly.mk
+
