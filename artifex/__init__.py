@@ -2,6 +2,25 @@ from subprocess import Popen, call, PIPE
 import os, sys, re, cPickle
 VERSION = (0, 1, 1)
 
+class Color:
+    """ From blender """
+    Header = '\033[95m'
+    Blue = '\033[94m'
+    Green = '\033[92m'
+    Warning = '\033[93m'
+    Fail = '\033[91m'
+    End = '\033[0m'
+
+    def disable(self):
+        self.Header = ''
+        self.Blue = ''
+        self.Green = ''
+        self.Warning = ''
+        self.Fail = ''
+        self.End = ''
+
+
+
 def _mkdir(dr):
     if os.path.isfile(dr):
         raise OSError("Can't create directory %s - a file by the same name already exists" % (dr))
@@ -38,24 +57,45 @@ def _parse_options():
 
 _opts, _args = _parse_options()
 
-def info(s, *args):
+def info(s, *args, **kwargs):
     if not _opts.quiet:
-        print s % args
+        clr = Color.Blue
+        if 'color' in kwargs:
+            clr = kwargs['color']
+        print clr + (s % args) + Color.End
 
 def debug(s, *args):
     if _opts.debug:
         print s % args
+
+def _fileisnewer(mtime, fil):
+    if os.path.isfile(fil):
+        return os.stat(fil).st_mtime > mtime
+    else:
+        return False
+
+def _listify(lst):
+    if isinstance(lst, basestring):
+        return lst.split()
+    return lst
 
 class FileNotFoundException(Exception):
     pass
 
 class Finder(object):
     def __init__(self):
-        pass
+        self.locations = ['.']
+
+    def add(self, location):
+        debug("Adding search location: %s", location)
+        if location not in self.locations:
+            self.locations.append(location)
 
     def locate(self, fil):
-        if os.path.isfile(fil):
-            return fil
+        path, name = os.path.split(fil)
+        for loc in self.locations:
+            if os.path.isfile(os.path.join(loc, fil)):
+                return fil
         raise FileNotFoundException
 
 class DepScanner(object):
@@ -78,12 +118,6 @@ class DepScanner(object):
         except FileNotFoundException, e:
             pass
         return collect
-
-def _fileisnewer(mtime, fil):
-    if os.path.isfile(fil):
-        return os.stat(fil).st_mtime > mtime
-    else:
-        return False
 
 class Dependencies(object):
     def __init__(self):
@@ -140,19 +174,21 @@ class Target(object):
         self.debug = False
         self.source = []
         self.cc = "gcc"
-        self.cflags = ["-g"]
+        self.cflags = ["-g", "-Wall", "-Werror"]
+        self.include = ['-I.']
         self.libs = []
 
         self._cleaned = False
         self._target_path = None
         self._target_mtime = None
 
-    def pkgconfig(self, name):
-        flags = Popen(["pkg-config", "--cflags", name], stdout=PIPE).communicate()[0].split()
-        self.cflags = self.cflags + flags
-        libs = Popen(["pkg-config", "--libs", name], stdout=PIPE).communicate()[0].split()
-        self.libs = self.libs + libs
-        debug("pkgconfig %s: %s, %s", name, flags, libs)
+    def pkgconfig(self, names):
+        for name in _listify(names):
+            flags = Popen(["pkg-config", "--cflags", name], stdout=PIPE).communicate()[0].split()
+            self.cflags = _listify(self.cflags) + flags
+            libs = Popen(["pkg-config", "--libs", name], stdout=PIPE).communicate()[0].split()
+            self.libs = _listify(self.libs) + libs
+            debug("pkgconfig %s: %s, %s", name, flags, libs)
 
     def _objform(self, sourcefile):
         sppath = os.path.splitext(sourcefile)
@@ -163,18 +199,20 @@ class Target(object):
         if not self.deps.is_dirty(fil, target):
             debug("+ %s -> %s - not dirty, skipping", fil, target)
             return -1
-        info("+ %s", fil)
+        _mkdir(os.path.dirname(target))
         cmdline = [self.cc] + ["-c", "-o", target] + self.cflags + [fil]
         debug("%s", " ".join(cmdline))
-        return Popen(cmdline).pid
+        pd = Popen(cmdline).pid
+        info("+ %s", fil)
+        return pd
 
     def _link(self, objs):
         relink = (self._target_mtime is None) or any(_fileisnewer(self._target_mtime, obj) for obj in objs)
         if relink:
-            info("= %s", self.name)
             cmdline = [self.cc] + self.cflags + ["-o", self._target_path] + self.libs + objs
             debug("%s", " ".join(cmdline))
             call(cmdline)
+            info("= %s", self.name, color=Color.Green)
         else:
             debug("%s up to date, skipping", self.name)
 
@@ -199,26 +237,30 @@ class Target(object):
         self._cleaned = True
 
     def _build(self):
-            if isinstance(self.source, basestring):
-                self.source = self.source.split()
-            if self.cc == "gcc" and any(_cppname(s) for s in self.source):
-                self.cc = "g++"
-            self._target_path = os.path.join(self.outdir, self.name)
-            try:
-                self._target_mtime = os.stat(self._target_path).st_mtime
-            except OSError, e:
-                self._target_mtime = None
-            # force clean if build script changed
-            if self._target_mtime:
-                me = sys.argv[0]
-                if _fileisnewer(self._target_mtime, me):
-                    self._clean()
-            _mkdir(self.outdir)
-            _mkdir(self.tempdir)
-            depfile = os.path.join(self.tempdir, self.name + ".depends")
-            self.deps.load(depfile)
-            self.build()
-            self.deps.save(depfile)
+        self.include = _listify(self.include)
+        self.source = _listify(self.source)
+        self.cflags = _listify(self.cflags)
+        self.libs = _listify(self.libs)
+        for inc in self.include:
+            self.deps.finder.add(inc[2:])
+        if self.cc == "gcc" and any(_cppname(s) for s in self.source):
+            self.cc = "g++"
+        self._target_path = os.path.join(self.outdir, self.name)
+        try:
+            self._target_mtime = os.stat(self._target_path).st_mtime
+        except OSError, e:
+            self._target_mtime = None
+        # force clean if build script changed
+        if self._target_mtime:
+            me = sys.argv[0]
+            if _fileisnewer(self._target_mtime, me):
+                self._clean()
+        _mkdir(self.outdir)
+        _mkdir(self.tempdir)
+        depfile = os.path.join(self.tempdir, self.name + ".depends")
+        self.deps.load(depfile)
+        self.build()
+        self.deps.save(depfile)
 
     def __call__(self):
         if _opts.version:
