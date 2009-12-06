@@ -355,8 +355,7 @@ atexit.register(_artifex)
 def program(buildfn):
     class Program(Target):
         def build(self):
-            pids = [self._compile(dep) for dep in self.source]
-            ok = [os.waitpid(p, 0) for p in pids if p >= 0]
+            ok = [os.waitpid(p, 0) for p in (self._compile(dep) for dep in self.source) if p >= 0]
             self._link([self._objform(dep) for dep in self.source])
     target = buildfn.__name__
     bld = Program(buildfn.__name__)
