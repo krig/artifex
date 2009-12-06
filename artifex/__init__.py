@@ -113,18 +113,28 @@ class FileNotFoundException(Exception):
 
 class Finder(object):
     def __init__(self):
-        self.locations = ['.']
+        self.locations = ['']
+        self.locstack = []
 
     def add(self, location):
-        debug("Adding search location: %s", location)
         if location not in self.locations:
             self.locations.append(location)
 
+    def push(self, location):
+        self.locstack = [location] + self.locstack
+
+    def pop(self):
+        self.locstack = self.locstack[1:]
+
     def locate(self, fil):
         path, name = os.path.split(fil)
+        for loc in self.locstack:
+            if os.path.isfile(os.path.join(loc, fil)):
+                return os.path.join(loc, fil)
         for loc in self.locations:
             if os.path.isfile(os.path.join(loc, fil)):
-                return fil
+                return os.path.join(loc, fil)
+        debug("%s: not found, ignoring", fil)
         raise FileNotFoundException
 
 class DepScanner(object):
@@ -139,13 +149,16 @@ class DepScanner(object):
         if not self.include_re:
             self.include_re = re.compile(r"\s*#\s*include\s*\"([^\"]+)\"")
         try:
-            for line in open(finder.locate(fil)).readlines():
+            finder.push(os.path.dirname(fil))
+            found = finder.locate(fil)
+            for line in open(found).readlines():
                 m = self._match_include(line)
                 if m:
                     self.scan_include(finder, m, collect)
-            collect.add(fil)
+            finder.pop()
+            collect.add(found)
         except IOError, e:
-            pass
+            debug("DepScanner: %s", e)
         except FileNotFoundException, e:
             pass
         return collect
@@ -190,12 +203,12 @@ class Dependencies(object):
             deps = self.add(iname)
 
         if not os.path.isfile(oname):
-            del self._depends[iname]
             return True
         omtime = os.stat(oname).st_mtime
 
         for dep in deps:
             if _fileisnewer(omtime, dep):
+                debug("%s is newer, delete deps", dep)
                 del self._depends[iname]
                 return True
         return False
@@ -242,15 +255,19 @@ class Target(object):
             self.include = cachedata['include']
             self._pkgconfig_proc = cachedata['_pkgconfig_proc']
 
-    def pkgconfig(self, names):
-        for name in _listify(names):
-            if name not in self._pkgconfig_proc:
-                flags = Popen(["pkg-config", "--cflags", name], stdout=PIPE).communicate()[0].split()
+    def pkgconfig(self, names = [], tool="pkg-config"):
+        names = _listify(names)
+        if names == []:
+            names = ['']
+        for name in names:
+            pkgid = tool+":"+name
+            if pkgid not in self._pkgconfig_proc:
+                flags = Popen([tool, "--cflags"] + ([name] if name else []), stdout=PIPE).communicate()[0].split()
                 self.cflags = _listify(self.cflags) + flags
-                libs = Popen(["pkg-config", "--libs", name], stdout=PIPE).communicate()[0].split()
+                libs = Popen([tool, "--libs"] + ([name] if name else []), stdout=PIPE).communicate()[0].split()
                 self.libs = _listify(self.libs) + libs
-                debug("pkgconfig %s: %s, %s", name, flags, libs)
-                self._pkgconfig_proc.add(name)
+                debug("%s: %s, %s", pkgid, flags, libs)
+                self._pkgconfig_proc.add(pkgid)
 
     def _objform(self, sourcefile):
         sppath = os.path.splitext(sourcefile)
@@ -375,4 +392,35 @@ def after(fn):
         _a_after[fn.__name__].append(fn)
     else:
         _a_after[fn.__name__] = [fn]
+    return None
+
+def config_h(fn):
+    class ConfigH(object):
+        def __init__(self, pkg):
+            self.pkg = pkg
+            self.name = "config.h"
+        def write(self):
+            towrite = """#ifndef CONFIG_H_ARTIFEX
+#define CONFIG_H_ARTIFEX
+"""
+            values = [(x, getattr(cfg, x)) for x in dir(cfg) if not x.startswith('_')]
+            for key, val in values:
+                if key == "pkg" or key == "name" or key == "write":
+                    continue
+                if isinstance(val, basestring):
+                    towrite += '#define %s "%s"\n' % (key, val)
+                elif isinstance(val, (int, long)):
+                    towrite += "#define %s %s\n" % (key, val)
+            towrite += """#endif /*CONFIG_H_ARTIFEX*/
+"""
+            if os.path.isfile(self.name):
+                current = open(self.name).read()
+                if current == towrite:
+                    return
+            f = open(self.name, 'w')
+            f.write(towrite)
+            f.close()
+    cfg = ConfigH(fn.__name__)
+    fn(cfg)
+    cfg.write()
     return None
