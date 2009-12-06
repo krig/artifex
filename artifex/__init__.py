@@ -1,23 +1,23 @@
 from subprocess import Popen, call, PIPE
-import os, sys, re, cPickle
+import os, sys, re, cPickle, glob
 VERSION = (0, 1, 1)
 
 class Color:
-    """ From blender """
-    Header = '\033[95m'
-    Blue = '\033[94m'
-    Green = '\033[92m'
+    Clean = '\033[95m'
+    Info = '\033[94m'
+    Finished = '\033[92m'
     Warning = '\033[93m'
     Fail = '\033[91m'
     End = '\033[0m'
 
-    def disable(self):
-        self.Header = ''
-        self.Blue = ''
-        self.Green = ''
-        self.Warning = ''
-        self.Fail = ''
-        self.End = ''
+    @classmethod
+    def disable(cls):
+        cls.Clean = ''
+        cls.Info = ''
+        cls.Finished = ''
+        cls.Warning = ''
+        cls.Fail = ''
+        cls.End = ''
 
 
 
@@ -50,16 +50,32 @@ def _parse_options():
     parser.add_option("-v", "--verbose",
                       action="store_true", dest="debug", default=False,
                       help="print debug messages to stdout")
+    parser.add_option("-C", "--no-color",
+                      action="store_false", dest="color", default=True,
+                      help="disable color output")
     parser.add_option("--version",
                       action="store_true", dest="version", default=False,
                       help="output version information and exit")
     return parser.parse_args()
 
+def _print_version():
+    print "%s %s" % ("artifex", ".".join(str(x) for x in VERSION))
+    print u"""Copyright (c) 2009 Kristoffer Gr\u00f6nlund.
+
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+
+Written by Kristoffer Gr\u00f6nlund."""
+    sys.exit(0)
+
 _opts, _args = _parse_options()
+if not _opts.color:
+    Color.disable()
 
 def info(s, *args, **kwargs):
     if not _opts.quiet:
-        clr = Color.Blue
+        clr = Color.Info
         if 'color' in kwargs:
             clr = kwargs['color']
         print clr + (s % args) + Color.End
@@ -74,10 +90,22 @@ def _fileisnewer(mtime, fil):
     else:
         return False
 
-def _listify(lst):
+def _flatten(lst):
+    res = []
+    for item in lst:
+        if isinstance(item, (tuple, list)):
+            res.extend(x for x in item)
+        else:
+            res.append(item)
+    return res
+
+def _listify(lst, globs=False):
     if isinstance(lst, basestring):
-        return lst.split()
-    return lst
+        lst = lst.split()
+    if globs:
+        return _flatten(glob.glob(l) for l in lst)
+    else:
+        return lst
 
 class FileNotFoundException(Exception):
     pass
@@ -100,13 +128,15 @@ class Finder(object):
 
 class DepScanner(object):
     def __init__(self):
-        self.include_re = re.compile(r"\s*#\s*include\s*\"([^\"]+)\"")
+        self.include_re = None
 
     def _match_include(self, line):
         m = self.include_re.match(line)
         return m.group(1) if m else None
 
     def scan_include(self, finder, fil, collect=set([])):
+        if not self.include_re:
+            self.include_re = re.compile(r"\s*#\s*include\s*\"([^\"]+)\"")
         try:
             for line in open(finder.locate(fil)).readlines():
                 m = self._match_include(line)
@@ -123,11 +153,13 @@ class Dependencies(object):
     def __init__(self):
         self.scanner = DepScanner()
         self.finder = Finder()
+        self._changed = False
         self._depends = {}
 
     def add(self, fil):
         ret = self.scanner.scan_include(self.finder, fil)
         self._depends[fil] = ret
+        self._changed = True
         debug("?: %s -> %s", fil, ret)
         return ret
 
@@ -135,10 +167,11 @@ class Dependencies(object):
         return self._depends.get(fil, None)
 
     def save(self, to):
-        debug("%s << %s", to, self._depends)
-        f = open(to, 'w')
-        cPickle.dump(self._depends, f)
-        f.close()
+        if self._changed:
+            debug("%s << %s", to, self._depends)
+            f = open(to, 'w')
+            cPickle.dump(self._depends, f)
+            f.close()
 
     def load(self, fname):
         if os.path.isfile(fname):
@@ -146,6 +179,7 @@ class Dependencies(object):
             self._depends = cPickle.load(f)
             debug("%s >> %s", fname, self._depends)
             f.close()
+            self._changed = False
         else:
             self._depends = {}
 
@@ -200,7 +234,7 @@ class Target(object):
             debug("+ %s -> %s - not dirty, skipping", fil, target)
             return -1
         _mkdir(os.path.dirname(target))
-        cmdline = [self.cc] + ["-c", "-o", target] + self.cflags + [fil]
+        cmdline = [self.cc] + ["-c", "-o", target] + self.include + self.cflags + [fil]
         debug("%s", " ".join(cmdline))
         pd = Popen(cmdline).pid
         info("+ %s", fil)
@@ -209,10 +243,10 @@ class Target(object):
     def _link(self, objs):
         relink = (self._target_mtime is None) or any(_fileisnewer(self._target_mtime, obj) for obj in objs)
         if relink:
-            cmdline = [self.cc] + self.cflags + ["-o", self._target_path] + self.libs + objs
+            cmdline = [self.cc] + self.include + self.cflags + ["-o", self._target_path] + self.libs + objs
             debug("%s", " ".join(cmdline))
             call(cmdline)
-            info("= %s", self.name, color=Color.Green)
+            info("= %s", self.name, color=Color.Finished)
         else:
             debug("%s up to date, skipping", self.name)
 
@@ -222,14 +256,13 @@ class Target(object):
 
         import shutil
 
+        info("- %s %s", self.tempdir, self.outdir, color=Color.Clean)
         try:
-            info("- %s", self.tempdir)
             shutil.rmtree(self.tempdir)
         except OSError, e:
             pass
 
         try:
-            info("- %s", self.outdir)
             shutil.rmtree(self.outdir)
         except OSError, e:
             pass
@@ -238,7 +271,7 @@ class Target(object):
 
     def _build(self):
         self.include = _listify(self.include)
-        self.source = _listify(self.source)
+        self.source = _listify(self.source, globs=True)
         self.cflags = _listify(self.cflags)
         self.libs = _listify(self.libs)
         for inc in self.include:
@@ -264,15 +297,7 @@ class Target(object):
 
     def __call__(self):
         if _opts.version:
-            print "%s %s" % ("artifex", ".".join(str(x) for x in VERSION))
-            print u"""Copyright (c) 2009 Kristoffer Gr\u00f6nlund.
-
-License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.
-This is free software: you are free to change and redistribute it.
-There is NO WARRANTY, to the extent permitted by law.
-
-Written by Kristoffer Gr\u00f6nlund."""
-            sys.exit(0)
+            _print_version()
         elif _opts.clean:
             self._clean()
         elif _opts.rebuild:
@@ -280,8 +305,6 @@ Written by Kristoffer Gr\u00f6nlund."""
             self._build()
         else:
             self._build()
-
-import atexit
 
 def program(buildfn):
     class Program(Target):
@@ -293,5 +316,6 @@ def program(buildfn):
     bld = Program(buildfn.__name__)
     buildfn(bld)
 
+    import atexit
     atexit.register(bld)
     return bld
