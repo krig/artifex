@@ -59,14 +59,15 @@ def _parse_options():
     return parser.parse_args()
 
 def _print_version():
-    print "%s %s" % ("artifex", ".".join(str(x) for x in VERSION))
-    print u"""Copyright (c) 2009 Kristoffer Gr\u00f6nlund.
+    print u"""%s %s
+Copyright (c) 2009 Kristoffer Gr\u00f6nlund.
 
 License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.
 This is free software: you are free to change and redistribute it.
 There is NO WARRANTY, to the extent permitted by law.
 
-Written by Kristoffer Gr\u00f6nlund."""
+Written by Kristoffer Gr\u00f6nlund.""" % ("artifex",
+                                           ".".join(str(x) for x in VERSION))
     sys.exit(0)
 
 _opts, _args = _parse_options()
@@ -168,7 +169,7 @@ class Dependencies(object):
 
     def save(self, to):
         if self._changed:
-            debug("%s << %s", to, self._depends)
+            debug("Saving dependencies: %s", self._depends)
             f = open(to, 'w')
             cPickle.dump(self._depends, f)
             f.close()
@@ -177,7 +178,7 @@ class Dependencies(object):
         if os.path.isfile(fname):
             f = open(fname)
             self._depends = cPickle.load(f)
-            debug("%s >> %s", fname, self._depends)
+            debug("Loaded dependencies: %s", self._depends)
             f.close()
             self._changed = False
         else:
@@ -212,17 +213,44 @@ class Target(object):
         self.include = ['-I.']
         self.libs = []
 
+        self._cachefile = os.path.join(self.tempdir, self.name+".cache")
+        self._pkgconfig_proc = set([])
         self._cleaned = False
         self._target_path = None
         self._target_mtime = None
 
+        self.load_cache()
+
+    def save_cache(self):
+        cachedata = {
+            'cflags' : self.cflags,
+            'include' : self.include,
+            'libs' : self.libs,
+            '_pkgconfig_proc' : self._pkgconfig_proc
+            }
+        f = open(self._cachefile, 'w')
+        cPickle.dump(cachedata, f)
+        f.close()
+
+    def load_cache(self):
+        if not _opts.rebuild and os.path.isfile(self._cachefile):
+            f = open(self._cachefile)
+            cachedata = cPickle.load(f)
+            f.close()
+            self.cflags = cachedata['cflags']
+            self.libs = cachedata['libs']
+            self.include = cachedata['include']
+            self._pkgconfig_proc = cachedata['_pkgconfig_proc']
+
     def pkgconfig(self, names):
         for name in _listify(names):
-            flags = Popen(["pkg-config", "--cflags", name], stdout=PIPE).communicate()[0].split()
-            self.cflags = _listify(self.cflags) + flags
-            libs = Popen(["pkg-config", "--libs", name], stdout=PIPE).communicate()[0].split()
-            self.libs = _listify(self.libs) + libs
-            debug("pkgconfig %s: %s, %s", name, flags, libs)
+            if name not in self._pkgconfig_proc:
+                flags = Popen(["pkg-config", "--cflags", name], stdout=PIPE).communicate()[0].split()
+                self.cflags = _listify(self.cflags) + flags
+                libs = Popen(["pkg-config", "--libs", name], stdout=PIPE).communicate()[0].split()
+                self.libs = _listify(self.libs) + libs
+                debug("pkgconfig %s: %s, %s", name, flags, libs)
+                self._pkgconfig_proc.add(name)
 
     def _objform(self, sourcefile):
         sppath = os.path.splitext(sourcefile)
@@ -231,11 +259,11 @@ class Target(object):
     def _compile(self, fil):
         target = self._objform(fil)
         if not self.deps.is_dirty(fil, target):
-            debug("+ %s -> %s - not dirty, skipping", fil, target)
+            debug("+ %s -> %s - up to date, skipping", fil, target)
             return -1
         _mkdir(os.path.dirname(target))
-        cmdline = [self.cc] + ["-c", "-o", target] + self.include + self.cflags + [fil]
-        debug("%s", " ".join(cmdline))
+        cmdline = [self.cc, "-c", "-o", target] + self.include + self.cflags + [fil]
+        debug("%s", cmdline)
         pd = Popen(cmdline).pid
         info("+ %s", fil)
         return pd
@@ -243,12 +271,12 @@ class Target(object):
     def _link(self, objs):
         relink = (self._target_mtime is None) or any(_fileisnewer(self._target_mtime, obj) for obj in objs)
         if relink:
-            cmdline = [self.cc] + self.include + self.cflags + ["-o", self._target_path] + self.libs + objs
-            debug("%s", " ".join(cmdline))
+            cmdline = [self.cc, "-o", self._target_path]  + self.include + self.cflags + self.libs + objs
+            debug("%s", cmdline)
             call(cmdline)
             info("= %s", self.name, color=Color.Finished)
         else:
-            debug("%s up to date, skipping", self.name)
+            debug("= %s - up to date, skipping", self.name)
 
     def _clean(self):
         if self._cleaned:
@@ -294,6 +322,7 @@ class Target(object):
         self.deps.load(depfile)
         self.build()
         self.deps.save(depfile)
+        self.save_cache()
 
     def __call__(self):
         if _opts.version:
@@ -306,6 +335,23 @@ class Target(object):
         else:
             self._build()
 
+_a_programs = []
+_a_before = {}
+_a_after = {}
+
+def _artifex():
+    for program in _a_programs:
+        if program.name in _a_before:
+            for fn in _a_before[program.name]:
+                fn(program)
+        program()
+        if program.name in _a_after:
+            for fn in _a_after[program.name]:
+                fn(program)
+
+import atexit
+atexit.register(_artifex)
+
 def program(buildfn):
     class Program(Target):
         def build(self):
@@ -315,7 +361,19 @@ def program(buildfn):
     target = buildfn.__name__
     bld = Program(buildfn.__name__)
     buildfn(bld)
+    _a_programs.append(bld)
+    return None
 
-    import atexit
-    atexit.register(bld)
-    return bld
+def before(fn):
+    if fn.__name__ in _a_before:
+        _a_before[fn.__name__].append(fn)
+    else:
+        _a_before[fn.__name__] = [fn]
+    return None
+
+def after(fn):
+    if fn.__name__ in _a_after:
+        _a_after[fn.__name__].append(fn)
+    else:
+        _a_after[fn.__name__] = [fn]
+    return None
