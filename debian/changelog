@@ -1,3 +1,13 @@
+artifex (0.1.2) unstable; urgency=low
+
+  * Dependency scanner now uses SHA-1 to compare files.
+
+  * General bugfixes in dependency scanner and pkgconfig() routine.
+
+  * Support alternative pkg-config-like scripts (like sdl-config)
+
+ -- Kristoffer Grönlund <kristoffer.gronlund@purplescout.se>  Sun, 06 Dec 2009 23:51:12 +0100
+
 artifex (0.1.1) unstable; urgency=low
 
   * Before/after clauses
