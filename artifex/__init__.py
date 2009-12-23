@@ -239,9 +239,11 @@ class Dependencies(object):
         rm = []
         for fil, (mtime, sha1) in self.filecache.iteritems():
             if not os.path.isfile(fil):
+                debug("not a file: %s", fil)
                 rm.append(fil)
                 continue
             nmtime = os.stat(fil).st_mtime
+            debug("%s: mtime: %s, nmtime: %s", fil, mtime, nmtime)
             if nmtime > mtime:
                 nsha1 = _calc_checksum_file(fil)
                 if nsha1 != sha1:
@@ -264,6 +266,7 @@ class Dependencies(object):
             deps = self.add(iname)
 
         if not os.path.isfile(oname):
+            debug("not file: %s", oname)
             return True
 
         omtime, osha1 = self.objcache.get(oname, (None, None))
@@ -273,9 +276,20 @@ class Dependencies(object):
         for dep in deps:
             if dep not in self.filecache:
                 debug("%s changed, %s is dirty", dep, oname)
+                self.changed = True
                 del self.depends[iname]
                 del self.objcache[oname]
                 return True
+            else:
+                mtime, sha1 = self.filecache[dep]
+                if mtime > omtime:
+                    debug("%s is newer than %s", dep, oname)
+                    self.changed = True
+                    del self.depends[iname]
+                    del self.objcache[oname]
+                    return True
+                else:
+                    debug("%s:%s not changed", dep, oname)
         return False
 
 class Target(object):
@@ -355,10 +369,12 @@ class Target(object):
         if relink:
             cmdline = [self.cc, "-o", self._target_path]  + self.include + self.cflags + self.libs + objs
             debug("%s", cmdline)
-            call(cmdline)
+            ret = call(cmdline)
             info("= %s", self.name, color=Color.Finished)
+            return ret == 0
         else:
             debug("= %s - up to date, skipping", self.name)
+            return True
 
     def _clean(self):
         if self._cleaned:
@@ -402,9 +418,9 @@ class Target(object):
         _mkdir(self.tempdir)
         depfile = os.path.join(self.tempdir, self.name + ".depends")
         self.deps.load(depfile)
-        self.build()
-        self.deps.save(depfile)
-        self.save_cache()
+        if self.build():
+            self.deps.save(depfile)
+            self.save_cache()
 
     def __call__(self):
         if _opts.version:
@@ -438,7 +454,15 @@ def program(buildfn):
     class Program(Target):
         def build(self):
             ok = [os.waitpid(p, 0) for p in (self._compile(dep) for dep in self.source) if p >= 0]
-            self._link([self._objform(dep) for dep in self.source])
+            ok = [(dep, ret[1] == 0) for dep, ret in zip(self.source, ok)]
+            for dep, result in ok:
+                debug("Compile: %s - %s", dep, result)
+
+            if any(not ret for _, ret in ok):
+                debug("Build failed.")
+                return False
+            else:
+                return self._link([self._objform(dep) for dep in self.source])
     target = buildfn.__name__
     bld = Program(buildfn.__name__)
     buildfn(bld)
