@@ -306,6 +306,8 @@ class Target(object):
         self.cflags = ["-g", "-Wall", "-Werror"]
         self.include = ['-I.']
         self.libs = []
+        self.pkg_cflags = []
+        self.pkg_libs = []
 
         self._cachefile = os.path.join(self.tempdir, self.name+".cache")
         self._pkgconfig_proc = set([])
@@ -320,6 +322,8 @@ class Target(object):
             'cflags' : self.cflags,
             'include' : self.include,
             'libs' : self.libs,
+            'pkg_cflags' : self.pkg_cflags,
+            'pkg_libs' : self.pkg_libs,
             '_pkgconfig_proc' : self._pkgconfig_proc
             }
         f = open(self._cachefile, 'w')
@@ -332,6 +336,8 @@ class Target(object):
             cachedata = cPickle.load(f)
             f.close()
             self.cflags = cachedata['cflags']
+            self.pkg_cflags = cachedata['pkg_cflags']
+            self.pkg_libs = cachedata['pkg_libs']
             self.libs = cachedata['libs']
             self.include = cachedata['include']
             self._pkgconfig_proc = cachedata['_pkgconfig_proc']
@@ -344,9 +350,9 @@ class Target(object):
             pkgid = tool+":"+name
             if pkgid not in self._pkgconfig_proc:
                 flags = Popen([tool, "--cflags"] + ([name] if name else []), stdout=PIPE).communicate()[0].split()
-                self.cflags = _listify(self.cflags) + flags
+                self.pkg_cflags = _listify(self.pkg_cflags) + flags
                 libs = Popen([tool, "--libs"] + ([name] if name else []), stdout=PIPE).communicate()[0].split()
-                self.libs = _listify(self.libs) + libs
+                self.pkg_libs = _listify(self.pkg_libs) + libs
                 debug("%s: %s, %s", pkgid, flags, libs)
                 self._pkgconfig_proc.add(pkgid)
 
@@ -360,16 +366,16 @@ class Target(object):
             debug("+ %s -> %s - up to date, skipping", fil, target)
             return -1
         _mkdir(os.path.dirname(target))
-        cmdline = [self.cc, "-c", "-o", target] + self.include + self.cflags + [fil]
+        cmdline = [self.cc, "-c", "-o", target] + self.include + self.cflags + self.pkg_cflags + [fil]
         debug("%s", cmdline)
-        pd = Popen(cmdline).pid
+        pd = Popen(cmdline, shell=False).pid
         info("+ %s", fil)
         return pd
 
     def _link(self, objs):
         relink = (self._target_mtime is None) or any(_fileisnewer(self._target_mtime, obj) for obj in objs)
         if relink:
-            cmdline = [self.cc, "-o", self._target_path]  + self.include + self.cflags + self.libs + objs
+            cmdline = [self.cc, "-o", self._target_path]  + self.include + self.cflags + self.pkg_cflags + self.libs + self.pkg_libs + objs
             debug("%s", cmdline)
             ret = call(cmdline)
             info("= %s", self.name, color=Color.Finished)
@@ -401,6 +407,8 @@ class Target(object):
         self.include = _listify(self.include)
         self.source = _listify(self.source, globs=True)
         self.cflags = _listify(self.cflags)
+        self.pkg_cflags = _listify(self.pkg_cflags)
+        self.pkg_libs = _listify(self.pkg_libs)
         self.libs = _listify(self.libs)
         for inc in self.include:
             self.deps.finder.add(inc[2:])
