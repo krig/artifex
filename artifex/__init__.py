@@ -161,6 +161,7 @@ class DepScanner(object):
             finder.push(os.path.dirname(fil))
             found = finder.locate(fil)
             if dependencies.in_cache(found):
+                debug("%s: in cache", found)
                 return collect
             handle = open(found)
             lines = handle.readlines()
@@ -173,6 +174,7 @@ class DepScanner(object):
             mtime = os.stat(found).st_mtime
             cs = _calc_checksum_str(''.join(lines))
             dependencies.add_to_cache(found, mtime, cs)
+            debug("adding %s", found)
             collect.add(found)
         except IOError, e:
             debug("DepScanner: %s", e)
@@ -198,7 +200,7 @@ class Dependencies(object):
         return fil in self.filecache
 
     def add(self, fil):
-        ret = self.scanner.scan_include(self.finder, fil, self)
+        ret = self.scanner.scan_include(self.finder, fil, self, set([fil]))
         self.depends[fil] = ret
         self.changed = True
         debug("?: %s -> %s", fil, ret)
