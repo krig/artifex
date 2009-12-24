@@ -1,6 +1,7 @@
 from subprocess import Popen, call, PIPE
 import os, sys, re, cPickle, glob, hashlib, pprint
-VERSION = (0, 1, 2)
+from collections import defaultdict
+VERSION = (0, 1, 3)
 
 class Color:
     Clean = '\033[95m'
@@ -154,15 +155,19 @@ class DepScanner(object):
         m = self.include_re.match(line)
         return m.group(1) if m else None
 
-    def scan_include(self, finder, fil, dependencies, collect=set([])):
+    def scan_include(self, finder, fil, dependencies, collect):
+        if not collect:
+            collect.add(fil)
         if not self.include_re:
             self.include_re = re.compile(r"\s*#\s*include\s*\"([^\"]+)\"")
         try:
             finder.push(os.path.dirname(fil))
             found = finder.locate(fil)
-            if dependencies.in_cache(found):
-                debug("%s: in cache", found)
-                return collect
+            #if dependencies.in_cache(found):
+            #    debug("%s: in cache", found)
+            #    return collect
+            #if dep in cache and not changed:
+            #collect += dep + rdepends[dep]
             handle = open(found)
             lines = handle.readlines()
             handle.close()
@@ -187,7 +192,8 @@ class Dependencies(object):
         self.scanner = DepScanner()
         self.finder = Finder()
         self.changed = False
-        self.depends = {} # filename -> [filename]
+        self.depends = defaultdict(set) # filename -> [filename]
+        self.rdepends = defaultdict(set) # filename -> [filename]
         self.filecache = {} # filename -> (mtime, sha-1)
         self.objcache = {} # objname -> (mtime, sha-1)
 
@@ -200,10 +206,13 @@ class Dependencies(object):
         return fil in self.filecache
 
     def add(self, fil):
-        ret = self.scanner.scan_include(self.finder, fil, self, set([fil]))
-        self.depends[fil] = ret
         self.changed = True
-        debug("?: %s -> %s", fil, ret)
+        ret = self.scanner.scan_include(self.finder, fil, self, set([]))
+        debug("Dependency scan for %s returned %s", fil, ret)
+        self.depends[fil] = ret
+        for dep in ret:
+            self.rdepends[dep].add(fil)
+        debug("?: %s -> %s (%s)", fil, ret, [self.rdepends[dep] for dep in ret])
         return ret
 
     def _get(self, fil):
@@ -213,6 +222,7 @@ class Dependencies(object):
         if self.changed:
             f = open(to, 'w')
             cPickle.dump(self.depends, f, cPickle.HIGHEST_PROTOCOL)
+            cPickle.dump(self.rdepends, f, cPickle.HIGHEST_PROTOCOL)
             cPickle.dump(self.filecache, f, cPickle.HIGHEST_PROTOCOL)
             cPickle.dump(self.objcache, f, cPickle.HIGHEST_PROTOCOL)
             f.close()
@@ -222,9 +232,11 @@ class Dependencies(object):
         if os.path.isfile(fname):
             f = open(fname)
             self.depends = cPickle.load(f)
+            self.rdepends = cPickle.load(f)
             self.filecache = cPickle.load(f)
             self.objcache = cPickle.load(f)
             debug("Loaded dependencies:\n%s", pprint.pformat(self.depends, indent=2, width=60))
+            debug("Loaded reverse dependencies:\n%s", pprint.pformat(self.rdepends, indent=2, width=60))
             debug("Loaded filecache:\n%s", pprint.pformat(self.filecache, indent=2, width=60))
             debug("Loaded objcache:\n%s", pprint.pformat(self.objcache, indent=2, width=60))
             f.close()
@@ -235,6 +247,7 @@ class Dependencies(object):
             debug("Done.")
         else:
             self.depends = {}
+            self.rdepends = defaultdict(set)
 
     def _refresh_filecache(self):
         """recheck checksums, drop files that have changed"""
@@ -251,7 +264,19 @@ class Dependencies(object):
                 if nsha1 != sha1:
                     rm.append(fil)
         for fil in rm:
-            debug("%s changed, dropping from file cache", fil)
+            self._drop_from_filecache(fil)
+
+    def _drop_from_filecache(self, fil):
+        debug("%s changed, dropping from file cache", fil)
+        if fil in self.rdepends:
+            for rdep in self.rdepends[fil]:
+                if rdep in self.filecache:
+                    debug("drop %s", rdep)
+                    self.changed = True
+                    del self.filecache[rdep]
+        elif fil in self.filecache:
+            debug("drop %s", fil)
+            self.changed = True
             del self.filecache[fil]
 
     def add_to_objcache(self, oname):
@@ -277,9 +302,9 @@ class Dependencies(object):
 
         for dep in deps:
             if dep not in self.filecache:
-                debug("%s changed, %s is dirty", dep, oname)
+                debug("%s not in file cache, %s is dirty", dep, oname)
                 self.changed = True
-                del self.depends[iname]
+                self._drop_from_filecache(iname)
                 del self.objcache[oname]
                 return True
             else:
@@ -287,7 +312,7 @@ class Dependencies(object):
                 if mtime > omtime:
                     debug("%s is newer than %s", dep, oname)
                     self.changed = True
-                    del self.depends[iname]
+                    self._drop_from_filecache(iname)
                     del self.objcache[oname]
                     return True
                 else:
@@ -371,6 +396,11 @@ class Target(object):
         pd = Popen(cmdline, shell=False).pid
         info("+ %s", fil)
         return pd
+
+    def _compile_success(self, fil):
+        """called when a compile succeeded"""
+        if not self.deps.in_cache(fil):
+            self.deps.add(fil)
 
     def _link(self, objs):
         relink = (self._target_mtime is None) or any(_fileisnewer(self._target_mtime, obj) for obj in objs)
@@ -467,6 +497,8 @@ def program(buildfn):
             ok = [(dep, ret[1] == 0) for dep, ret in zip(self.source, ok)]
             for dep, result in ok:
                 debug("Compile: %s - %s", dep, result)
+                if result:
+                    self._compile_success(dep)
 
             if any(not ret for _, ret in ok):
                 debug("Build failed.")

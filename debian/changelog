@@ -1,3 +1,9 @@
+artifex (0.1.3) unstable; urgency=low
+
+  * Dependency scanner was somewhat broken, should now be less broken.
+
+ -- Kristoffer Grönlund <kristoffer.gronlund@purplescout.se>  Thu, 24 Dec 2009 22:40:27 +0100
+
 artifex (0.1.2) unstable; urgency=low
 
   * Dependency scanner now uses SHA-1 to compare files.
