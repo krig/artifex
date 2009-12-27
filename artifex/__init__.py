@@ -383,7 +383,8 @@ class Target(object):
 
     def _objform(self, sourcefile):
         sppath = os.path.splitext(sourcefile)
-        return os.path.join(self.tempdir, sppath[0]+".o")
+        oname = sppath[0].replace("..", "_parent_")+".o"
+        return os.path.join(self.tempdir, oname)
 
     def _compile(self, fil):
         target = self._objform(fil)
