@@ -114,9 +114,9 @@ def _listify(lst, globs=False):
     if isinstance(lst, basestring):
         lst = lst.split()
     if globs:
-        return _flatten(glob.glob(l) for l in lst)
+        return list(set(_flatten(glob.glob(l) for l in lst)))
     else:
-        return lst
+        return list(set(lst))
 
 class FileNotFoundException(Exception):
     pass
@@ -400,7 +400,9 @@ class Target(object):
 
     def _compile_success(self, fil):
         """called when a compile succeeded"""
+        debug("Compiled: %s", fil)
         if not self.deps.in_cache(fil):
+            debug("Adding %s to cache", fil)
             self.deps.add(fil)
 
     def _link(self, objs):
@@ -494,12 +496,12 @@ atexit.register(_artifex)
 def program(buildfn):
     class Program(Target):
         def build(self):
-            ok = [os.waitpid(p, 0) for p in (self._compile(dep) for dep in self.source) if p >= 0]
-            ok = [(dep, ret[1] == 0) for dep, ret in zip(self.source, ok)]
-            for dep, result in ok:
-                debug("Compile: %s - %s", dep, result)
-                if result:
-                    self._compile_success(dep)
+            # save results of compilations in ok = [(sourcefile, ret)...]
+            ok = [(dep, os.waitpid(p, 0)[1] == 0) for dep, p in \
+                      ((dep, self._compile(dep)) for dep in self.source) if p >= 0]
+
+            # apply success function to all dep if ret == 0
+            [self._compile_success(dep) for dep, ret in ok if ret]
 
             if any(not ret for _, ret in ok):
                 debug("Build failed.")
